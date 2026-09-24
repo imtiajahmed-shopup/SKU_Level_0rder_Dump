@@ -1,0 +1,39 @@
+name: metabase-to-supabase-sync
+
+on:
+  workflow_dispatch:
+    inputs:
+      from_date:
+        description: "From date (YYYY-MM-DD)"
+        required: false
+        default: "2026-09-01"
+      to_date:
+        description: "To date (YYYY-MM-DD)"
+        required: false
+        default: "2026-09-23"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run sync script
+        env:
+          METABASE_URL: ${{ secrets.METABASE_URL }}
+          METABASE_SESSION_TOKEN: ${{ secrets.METABASE_SESSION_TOKEN }}
+          METABASE_CARD_ID: ${{ secrets.METABASE_CARD_ID }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          FROM_DATE: ${{ github.event.inputs.from_date }}
+          TO_DATE: ${{ github.event.inputs.to_date }}
+        run: python sync.py

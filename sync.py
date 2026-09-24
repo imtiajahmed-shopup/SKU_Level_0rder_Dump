@@ -1,5 +1,4 @@
 import os
-import hashlib
 import requests
 from supabase import create_client
 
@@ -104,23 +103,6 @@ def filter_columns(records):
     ]
 
 
-def add_row_hash(records):
-    for record in records:
-        key = "|".join(
-            str(record.get(field, ""))
-            for field in ["sku", "delivered_date", "db_id", "order_type", "status"]
-        )
-        record["row_hash"] = hashlib.md5(key.encode("utf-8")).hexdigest()
-    return records
-
-
-def deduplicate_records(records):
-    deduped = {}
-    for record in records:
-        deduped[record["row_hash"]] = record
-    return list(deduped.values())
-
-
 def push_to_supabase(records):
     if not records:
         print("No records returned from Metabase. Nothing to sync.")
@@ -131,8 +113,8 @@ def push_to_supabase(records):
 
     for i in range(0, len(records), batch_size):
         batch = records[i:i + batch_size]
-        sb.table(TABLE_NAME).upsert(batch, on_conflict="row_hash").execute()
-        print(f"Upserted batch {i // batch_size + 1} ({len(batch)} rows)")
+        sb.table(TABLE_NAME).insert(batch).execute()
+        print(f"Inserted batch {i // batch_size + 1} ({len(batch)} rows)")
 
 
 def main():
@@ -144,14 +126,6 @@ def main():
     print(f"Fetched {len(records)} rows from Metabase card {MB_CARD_ID}.")
 
     records = filter_columns(records)
-    records = add_row_hash(records)
-
-    before = len(records)
-    records = deduplicate_records(records)
-    after = len(records)
-    if before != after:
-        print(f"Removed {before - after} duplicate row(s) based on sku+delivered_date+db_id+order_type+status.")
-
     push_to_supabase(records)
 
     print("Sync complete.")

@@ -158,7 +158,6 @@ def main():
     )
 
     records = fetch_card_data()
-
     records = normalize_keys(records)
 
     print(
@@ -166,8 +165,10 @@ def main():
         f"from Metabase card {MB_CARD_ID}."
     )
 
-    records = add_row_hash(records)
+    if records:
+        print("COLUMNS RETURNED BY METABASE:", sorted(records[0].keys()))
 
+    records = add_row_hash(records)
     push_to_supabase(records)
 
     print("Sync complete.")

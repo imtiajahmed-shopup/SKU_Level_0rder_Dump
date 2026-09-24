@@ -25,13 +25,15 @@ def fetch_card_data():
     payload = {
         "parameters": [
             {
-                "type": "date/range",
-                "target": [
-                    "variable",
-                    ["template-tag", "date_range"]
-                ],
-                "value": f"{FROM_DATE}~{TO_DATE}",
-            }
+                "type": "date/single",
+                "target": ["variable", ["template-tag", "from"]],
+                "value": FROM_DATE,
+            },
+            {
+                "type": "date/single",
+                "target": ["variable", ["template-tag", "to"]],
+                "value": TO_DATE,
+            },
         ]
     }
 

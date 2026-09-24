@@ -1,3 +1,13 @@
+      - name: Inspect Metabase card (debug)
+        env:
+          METABASE_URL: ${{ secrets.METABASE_URL }}
+          METABASE_SESSION_TOKEN: ${{ secrets.METABASE_SESSION_TOKEN }}
+          METABASE_CARD_ID: ${{ secrets.METABASE_CARD_ID }}
+        run: python inspect_card.py
+
+
+
+
 name: metabase-to-supabase-sync
 
 on:

@@ -5,8 +5,7 @@ from supabase import create_client
 
 # ---- Config from environment ----
 MB_URL = os.environ["METABASE_URL"].rstrip("/")
-MB_EMAIL = os.environ["METABASE_EMAIL"]
-MB_PASSWORD = os.environ["METABASE_PASSWORD"]
+MB_SESSION_TOKEN = os.environ["METABASE_SESSION_TOKEN"]
 MB_CARD_ID = os.environ["METABASE_CARD_ID"]
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
@@ -18,18 +17,8 @@ TO_DATE = os.environ["TO_DATE"]
 TABLE_NAME = os.environ.get("SUPABASE_TABLE", "sales_orders")
 
 
-def get_session_token():
-    resp = requests.post(
-        f"{MB_URL}/api/session",
-        json={"username": MB_EMAIL, "password": MB_PASSWORD},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    return resp.json()["id"]
-
-
-def fetch_card_data(session_token):
-    headers = {"X-Metabase-Session": session_token}
+def fetch_card_data():
+    headers = {"X-Metabase-Session": MB_SESSION_TOKEN}
     payload = {
         "parameters": [
             {
@@ -45,6 +34,11 @@ def fetch_card_data(session_token):
         json=payload,
         timeout=120,
     )
+    if resp.status_code == 401:
+        raise RuntimeError(
+            "Metabase session token is invalid or expired. "
+            "Generate a new one and update the METABASE_SESSION_TOKEN secret."
+        )
     resp.raise_for_status()
     body = resp.json()
     data = body["data"]
@@ -68,7 +62,6 @@ def push_to_supabase(records):
         print("No records returned from Metabase. Nothing to sync.")
         return
     sb = create_client(SUPABASE_URL, SUPABASE_KEY)
-    # Upsert in batches to avoid payload limits
     batch_size = 500
     for i in range(0, len(records), batch_size):
         batch = records[i : i + batch_size]
@@ -78,10 +71,8 @@ def push_to_supabase(records):
 
 def main():
     print(f"Syncing data from {FROM_DATE} to {TO_DATE}...")
-    token = get_session_token()
-    print("Metabase session established.")
 
-    records = fetch_card_data(token)
+    records = fetch_card_data()
     print(f"Fetched {len(records)} rows from Metabase card {MB_CARD_ID}.")
 
     records = add_row_hash(records)

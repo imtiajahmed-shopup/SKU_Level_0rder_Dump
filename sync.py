@@ -15,7 +15,6 @@ TO_DATE = os.environ["TO_DATE"]
 
 TABLE_NAME = os.environ.get("SUPABASE_TABLE", "sales_orders")
 
-# Only these columns get kept and pushed to Supabase
 WANTED_COLUMNS = [
     "sku", "product_name", "category", "order_type", "status",
     "order_qty", "lp", "sp", "order_value", "delivered_qty",
@@ -115,6 +114,13 @@ def add_row_hash(records):
     return records
 
 
+def deduplicate_records(records):
+    deduped = {}
+    for record in records:
+        deduped[record["row_hash"]] = record
+    return list(deduped.values())
+
+
 def push_to_supabase(records):
     if not records:
         print("No records returned from Metabase. Nothing to sync.")
@@ -139,6 +145,13 @@ def main():
 
     records = filter_columns(records)
     records = add_row_hash(records)
+
+    before = len(records)
+    records = deduplicate_records(records)
+    after = len(records)
+    if before != after:
+        print(f"Removed {before - after} duplicate row(s) based on sku+delivered_date+db_id+order_type+status.")
+
     push_to_supabase(records)
 
     print("Sync complete.")

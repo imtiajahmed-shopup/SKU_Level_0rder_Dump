@@ -15,6 +15,9 @@ SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
 
 TABLE_NAME = os.environ.get("SUPABASE_TABLE", "sales_orders")
 
+# How many past days to re-check and re-sync every run (self-healing window)
+LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", "3"))
+
 WANTED_COLUMNS = [
     "sku", "product_name", "category", "order_type", "status",
     "order_qty", "lp", "sp", "order_value", "delivered_qty",
@@ -30,37 +33,11 @@ WANTED_COLUMNS = [
 sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 
-def get_last_synced_date():
-    """Find the most recent delivered_date already in Supabase."""
-    result = (
-        sb.table(TABLE_NAME)
-        .select("delivered_date")
-        .order("delivered_date", desc=True)
-        .limit(1)
-        .execute()
-    )
-    if result.data:
-        return result.data[0]["delivered_date"]
-    return None
-
-
 def compute_date_range():
-    last_date_str = get_last_synced_date()
+    """Re-sync the last LOOKBACK_DAYS days, ending yesterday, every run."""
     yesterday = date.today() - timedelta(days=1)
-
-    if last_date_str:
-        last_date = date.fromisoformat(last_date_str)
-        from_date = last_date + timedelta(days=1)
-    else:
-        # No data at all yet — fallback default (shouldn't happen since you backfilled manually)
-        from_date = yesterday
-
-    to_date = yesterday
-
-    if from_date > to_date:
-        return None, None  # already up to date, nothing new to fetch
-
-    return from_date.isoformat(), to_date.isoformat()
+    from_date = yesterday - timedelta(days=LOOKBACK_DAYS - 1)
+    return from_date.isoformat(), yesterday.isoformat()
 
 
 def fetch_card_data(from_date, to_date):
@@ -116,7 +93,7 @@ def fetch_card_data(from_date, to_date):
 
 
 def normalize_keys(records):
-    return [{k.lower(): v for k, v in record.items()} for record in records]
+    return [{k.strip().lower(): v for k, v in record.items()} for record in records]
 
 
 def filter_columns(records):
@@ -137,9 +114,15 @@ def clean_numeric_and_dates(records):
     return records
 
 
+def delete_existing_range(from_date, to_date):
+    """Delete existing rows in the window so we can re-insert fresh, corrected data."""
+    print(f"Deleting existing rows from {from_date} to {to_date} before re-sync...")
+    sb.table(TABLE_NAME).delete().gte("delivered_date", from_date).lte("delivered_date", to_date).execute()
+
+
 def push_to_supabase(records):
     if not records:
-        print("No new records to sync.")
+        print("No records to insert.")
         return
 
     batch_size = 500
@@ -151,12 +134,7 @@ def push_to_supabase(records):
 
 def main():
     from_date, to_date = compute_date_range()
-
-    if from_date is None:
-        print("Supabase is already up to date. Nothing to sync.")
-        return
-
-    print(f"Syncing data from {from_date} to {to_date}...")
+    print(f"Re-syncing window: {from_date} to {to_date} (self-healing, last {LOOKBACK_DAYS} days)")
 
     records = fetch_card_data(from_date, to_date)
     records = normalize_keys(records)
@@ -165,6 +143,8 @@ def main():
 
     records = filter_columns(records)
     records = clean_numeric_and_dates(records)
+
+    delete_existing_range(from_date, to_date)
     push_to_supabase(records)
 
     print("Sync complete.")

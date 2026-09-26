@@ -1,5 +1,9 @@
 import os
+import json
+import csv
+import io
 import requests
+from datetime import date, timedelta
 from supabase import create_client
 
 MB_URL = os.environ["METABASE_URL"].rstrip("/")
@@ -8,9 +12,6 @@ MB_CARD_ID = os.environ["METABASE_CARD_ID"]
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
-
-FROM_DATE = os.environ["FROM_DATE"]
-TO_DATE = os.environ["TO_DATE"]
 
 TABLE_NAME = os.environ.get("SUPABASE_TABLE", "sales_orders")
 
@@ -26,35 +27,71 @@ WANTED_COLUMNS = [
     "claimable_discount_total", "nmv",
 ]
 
+sb = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-def fetch_card_data():
-    headers = {
-        "X-Metabase-Session": MB_SESSION_TOKEN,
-        "Content-Type": "application/json",
-    }
+
+def get_last_synced_date():
+    """Find the most recent delivered_date already in Supabase."""
+    result = (
+        sb.table(TABLE_NAME)
+        .select("delivered_date")
+        .order("delivered_date", desc=True)
+        .limit(1)
+        .execute()
+    )
+    if result.data:
+        return result.data[0]["delivered_date"]
+    return None
+
+
+def compute_date_range():
+    last_date_str = get_last_synced_date()
+    yesterday = date.today() - timedelta(days=1)
+
+    if last_date_str:
+        last_date = date.fromisoformat(last_date_str)
+        from_date = last_date + timedelta(days=1)
+    else:
+        # No data at all yet — fallback default (shouldn't happen since you backfilled manually)
+        from_date = yesterday
+
+    to_date = yesterday
+
+    if from_date > to_date:
+        return None, None  # already up to date, nothing new to fetch
+
+    return from_date.isoformat(), to_date.isoformat()
+
+
+def fetch_card_data(from_date, to_date):
+    headers = {"X-Metabase-Session": MB_SESSION_TOKEN}
 
     payload = {
         "parameters": [
             {
                 "type": "date/single",
                 "target": ["variable", ["template-tag", "from"]],
-                "value": FROM_DATE,
+                "value": from_date,
             },
             {
                 "type": "date/single",
                 "target": ["variable", ["template-tag", "to"]],
-                "value": TO_DATE,
+                "value": to_date,
             },
         ]
     }
 
-    url = f"{MB_URL}/api/card/{MB_CARD_ID}/query"
+    url = f"{MB_URL}/api/card/{MB_CARD_ID}/query/csv"
 
-    print(f"Querying Metabase card {MB_CARD_ID}...")
-    print(f"Date range: {FROM_DATE} to {TO_DATE}")
+    print(f"Querying Metabase card {MB_CARD_ID} for {from_date} to {to_date}...")
 
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=120)
+        resp = requests.post(
+            url,
+            headers=headers,
+            data={"parameters": json.dumps(payload["parameters"])},
+            timeout=300,
+        )
     except requests.RequestException as e:
         raise RuntimeError(f"Could not connect to Metabase: {e}") from e
 
@@ -69,27 +106,13 @@ def fetch_card_data():
         print("METABASE API ERROR")
         print("========================================")
         print(f"Status code: {resp.status_code}")
-        print(f"Response body: {resp.text}")
+        print(f"Response body: {resp.text[:2000]}")
         print("========================================")
         raise RuntimeError(f"Metabase API returned HTTP {resp.status_code}")
 
-    try:
-        body = resp.json()
-    except ValueError as e:
-        raise RuntimeError(f"Metabase returned a non-JSON response: {resp.text}") from e
-
-    if "data" not in body:
-        raise RuntimeError(f"Unexpected Metabase response: {body}")
-
-    data = body["data"]
-
-    if "cols" not in data or "rows" not in data:
-        raise RuntimeError(f"Metabase response is missing cols or rows: {data}")
-
-    cols = [c["name"] for c in data["cols"]]
-    rows = data["rows"]
-
-    return [dict(zip(cols, row)) for row in rows]
+    csv_text = resp.content.decode("utf-8-sig")
+    reader = csv.DictReader(io.StringIO(csv_text))
+    return list(reader)
 
 
 def normalize_keys(records):
@@ -97,20 +120,29 @@ def normalize_keys(records):
 
 
 def filter_columns(records):
-    return [
-        {col: record.get(col) for col in WANTED_COLUMNS}
-        for record in records
-    ]
+    return [{col: record.get(col) for col in WANTED_COLUMNS} for record in records]
+
+
+def clean_numeric_and_dates(records):
+    numeric_cols = [c for c in WANTED_COLUMNS if c not in (
+        "sku", "product_name", "category", "order_type", "status",
+        "db_id", "delivered_date", "sub_anchor_type", "sub_bu"
+    )]
+    for r in records:
+        for col in numeric_cols:
+            val = r.get(col)
+            if val is not None:
+                val = str(val).replace(",", "").strip()
+                r[col] = float(val) if val not in ("", "None") else None
+    return records
 
 
 def push_to_supabase(records):
     if not records:
-        print("No records returned from Metabase. Nothing to sync.")
+        print("No new records to sync.")
         return
 
-    sb = create_client(SUPABASE_URL, SUPABASE_KEY)
     batch_size = 500
-
     for i in range(0, len(records), batch_size):
         batch = records[i:i + batch_size]
         sb.table(TABLE_NAME).insert(batch).execute()
@@ -118,14 +150,21 @@ def push_to_supabase(records):
 
 
 def main():
-    print(f"Syncing data from {FROM_DATE} to {TO_DATE}...")
+    from_date, to_date = compute_date_range()
 
-    records = fetch_card_data()
+    if from_date is None:
+        print("Supabase is already up to date. Nothing to sync.")
+        return
+
+    print(f"Syncing data from {from_date} to {to_date}...")
+
+    records = fetch_card_data(from_date, to_date)
     records = normalize_keys(records)
 
     print(f"Fetched {len(records)} rows from Metabase card {MB_CARD_ID}.")
 
     records = filter_columns(records)
+    records = clean_numeric_and_dates(records)
     push_to_supabase(records)
 
     print("Sync complete.")
